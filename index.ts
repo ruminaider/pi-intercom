@@ -426,6 +426,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let runtimeStarted = false;
   let runtimeGeneration = 0;
   let agentRunning = false;
+  // Tracks the last presence name we pushed to the broker. Compared against
+  // pi.getSessionName() on every status sync so we can detect renames that
+  // pi-coding-agent does not currently route through the extension runner.
+  // See note on syncPresenceStatus below.
+  let lastPushedName: string | undefined;
   const activeTools = new Map<string, string>();
   const replyTracker = new ReplyTracker();
   const pendingIdleMessages: InboundMessageEntry[] = [];
@@ -553,10 +558,26 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     if (!client || !getLiveContext()) {
       return;
     }
-    client.updatePresence({ ...buildPresenceIdentity(pi, sessionId), status: currentStatus() });
+    const identity = buildPresenceIdentity(pi, sessionId);
+    client.updatePresence({ ...identity, status: currentStatus() });
+    lastPushedName = identity.name;
   }
   function syncPresenceStatus(): void {
     if (!client || !currentSessionId || !getLiveContext()) {
+      return;
+    }
+    // pi-coding-agent's setSessionName only emits to internal listeners and
+    // never reaches the extension runner, so renames done through /name,
+    // /rename, or any other caller are invisible to us as a discrete event.
+    // To stay correct without forking pi-coding-agent, opportunistically
+    // detect that the resolved presence name has drifted from what we last
+    // pushed and upgrade this status-only sync to a full identity sync. Both
+    // the built-in /name (which calls AgentSession.setSessionName directly)
+    // and the public pi.setSessionName converge on the same internal method,
+    // so this drift check covers both rename paths.
+    const expectedName = resolveIntercomPresenceName(pi.getSessionName(), currentSessionId);
+    if (expectedName !== lastPushedName) {
+      syncPresenceIdentity(currentSessionId);
       return;
     }
     client.updatePresence({ status: currentStatus() });
@@ -756,12 +777,16 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       attachClientHandlers(nextClient);
       try {
         await spawnBrokerIfNeeded(config.brokerCommand, config.brokerArgs);
-        await nextClient.connect(buildRegistration());
+        const registration = buildRegistration();
+        await nextClient.connect(registration);
         if (!getLiveContext(contextAtStart, generationAtStart)) {
           await nextClient.disconnect();
           throw new Error("Intercom runtime no longer active");
         }
         client = nextClient;
+        // Seed the drift baseline so the very first post-connect status sync
+        // does not redundantly upgrade itself to a full identity sync.
+        lastPushedName = registration.name;
         reconnectAttempt = 0;
         return nextClient;
       } catch (error) {
