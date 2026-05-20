@@ -22,6 +22,7 @@ const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
 const SUBAGENT_CHILD_INDEX_ENV = "PI_SUBAGENT_CHILD_INDEX";
 const SUBAGENT_INTERCOM_SESSION_NAME_ENV = "PI_SUBAGENT_INTERCOM_SESSION_NAME";
+const PRESENCE_RENAME_POLL_MS = 2000;
 
 interface ChildOrchestratorMetadata {
   orchestratorTarget: string;
@@ -431,6 +432,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   // pi-coding-agent does not currently route through the extension runner.
   // See note on syncPresenceStatus below.
   let lastPushedName: string | undefined;
+  let presenceRenamePoller: NodeJS.Timeout | null = null;
   const activeTools = new Map<string, string>();
   const replyTracker = new ReplyTracker();
   const pendingIdleMessages: InboundMessageEntry[] = [];
@@ -581,6 +583,29 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       return;
     }
     client.updatePresence({ status: currentStatus() });
+  }
+  function pollPresenceRenameDrift(): void {
+    if (!client || !currentSessionId || !getLiveContext()) {
+      return;
+    }
+    const expectedName = resolveIntercomPresenceName(pi.getSessionName(), currentSessionId);
+    if (expectedName !== lastPushedName) {
+      syncPresenceIdentity(currentSessionId);
+    }
+  }
+  function startPresenceRenamePoller(): void {
+    if (presenceRenamePoller) {
+      return;
+    }
+    presenceRenamePoller = setInterval(pollPresenceRenameDrift, PRESENCE_RENAME_POLL_MS);
+    presenceRenamePoller.unref?.();
+  }
+  function stopPresenceRenamePoller(): void {
+    if (!presenceRenamePoller) {
+      return;
+    }
+    clearInterval(presenceRenamePoller);
+    presenceRenamePoller = null;
   }
   function currentSessionTargetMatches(to: string, resolvedTo?: string | null, activeClient?: IntercomClient): boolean {
     const targets = new Set<string>();
@@ -788,6 +813,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         // does not redundantly upgrade itself to a full identity sync.
         lastPushedName = registration.name;
         reconnectAttempt = 0;
+        startPresenceRenamePoller();
         return nextClient;
       } catch (error) {
         if (client === nextClient) {
@@ -971,6 +997,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     runtimeGeneration += 1;
     clearStartupConnectTimer();
     clearReconnectTimer();
+    stopPresenceRenamePoller();
     rejectReplyWaiter(new Error("Session shutting down"));
     replyTracker.reset();
     pendingIdleMessages.length = 0;
@@ -1037,11 +1064,13 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     currentModel = event.model.id;
     if (client) {
+      const identity = buildPresenceIdentity(pi, ctx.sessionManager.getSessionId());
       client.updatePresence({
-        ...buildPresenceIdentity(pi, ctx.sessionManager.getSessionId()),
+        ...identity,
         model: event.model.id,
         status: currentStatus(),
       });
+      lastPushedName = identity.name;
     }
   });
 
