@@ -134,8 +134,9 @@ function createExtensionHarness(sessionName = "child-worker", options: {
   const tools: CapturedTool[] = [];
   const entries: Array<{ type: string; data: unknown }> = [];
   const sentMessages: Array<{ message: { customType?: string; content?: string; details?: unknown }; options?: { triggerTurn?: boolean; deliverAs?: string } }> = [];
+  let currentSessionName = sessionName;
   const pi = {
-    getSessionName: () => sessionName,
+    getSessionName: () => currentSessionName,
     events: {
       on: (channel: string, handler: (payload: unknown) => void) => {
         events.on(channel, handler);
@@ -177,6 +178,9 @@ function createExtensionHarness(sessionName = "child-worker", options: {
     commands,
     entries,
     sentMessages,
+    setSessionName(name: string) {
+      currentSessionName = name;
+    },
     async emitLifecycle(event: string, payload: unknown = {}, eventContext: unknown = ctx) {
       for (const handler of lifecycleHandlers.get(event) ?? []) {
         await handler(payload, eventContext);
@@ -388,6 +392,37 @@ test("sessions publish automatic lifecycle status", { concurrency: false }, asyn
 
     await harness.emitLifecycle("agent_end");
     await waitForSessionStatus(planner, "status-worker", "idle");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("idle session rename propagates to the broker without any lifecycle event", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  const harness = createExtensionHarness("rename-before", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+
+    await waitForSessionByName(planner, "rename-before");
+
+    harness.setSessionName("rename-after");
+
+    const deadline = Date.now() + 4000;
+    let renamed: SessionInfo | undefined;
+    while (Date.now() < deadline) {
+      renamed = (await planner.listSessions()).find((session) => session.name === "rename-after");
+      if (renamed) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(renamed, "broker never observed the renamed session");
+    assert.equal(renamed.name, "rename-after");
+
+    const stale = (await planner.listSessions()).find((session) => session.name === "rename-before");
+    assert.equal(stale, undefined);
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
