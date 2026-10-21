@@ -24,7 +24,7 @@ Pi-intercom also integrates well with [pi-subagents](https://github.com/nicobail
 
 ## In One Minute
 
-Each pi session that has `pi-intercom` loaded and enabled connects to a tiny local broker over a local IPC transport. The broker keeps track of connected sessions and routes direct messages to the one you target by name or session ID. The extension gives you both a tool (`intercom`) and a small overlay UI (`/intercom` or `Alt+M`). Incoming messages are rendered inline inside the recipient session, can trigger a turn immediately, and are also stored in Pi session history as extension entries.
+Each pi session that has `pi-intercom` loaded and enabled connects to a tiny local broker over a local IPC transport. The broker keeps track of connected sessions and routes direct messages to the one you target by name or session ID. The extension gives you both a tool (`intercom`) and a small overlay UI (`/intercom` or `Alt+M`). Incoming messages are rendered inline inside the recipient session, can trigger a turn immediately by default, and are also stored in Pi session history as extension entries. If you want a stricter local trust posture, `inboundTrigger` can reduce or disable auto-triggering.
 
 ## Install
 
@@ -50,13 +50,27 @@ Coordinate with other local pi sessions on related codebases. Use `/skill:pi-int
 
 A session becomes intercom-connected when all of these are true:
 - the `pi-intercom` extension is installed and loaded in that session
-- `enabled` is not set to `false` in `~/.pi/agent/intercom/config.json`
+- `enabled` is not set to `false` in the intercom config file, which defaults to `~/.pi/agent/intercom/config.json`
 - the session has started or reloaded after the extension was installed
 - the local broker is running or can be auto-started
 
 The session list only shows intercom-connected sessions, not every open Pi process on the machine.
 
-If a session is unnamed, pi-intercom now exposes a runtime-only fallback alias like `subagent-chat-1a2b3c4d` so other sessions can still target it. That alias is not persisted as the Pi session title, so `pi --resume` can keep showing the transcript snippet instead of a generic `session-...` name.
+If a session is unnamed, pi-intercom exposes a collision-resistant runtime-only fallback alias like `subagent-chat-1a2b3c4d-5e6f-7a8b` so other connected sessions can target it. That alias is not persisted as the Pi session title or treated as a reconnect identity, so `pi --resume` can keep showing the transcript snippet without allowing a different unnamed process to inherit queued mail.
+
+### Name your current session
+
+Use `/alias <name>` as a pi-intercom-friendly way to name the current session:
+
+```text
+/alias api-worker
+```
+
+The alias is Pi's session name, so it is persisted in the session and immediately
+published to pi-intercom peers. Session lists, send/reply results, overlays, and
+incoming message headers use it when available. In an interactive UI, `/alias`
+or `/alias menu` opens an input for the current session's alias; it does not
+rename other sessions. Use `/alias <name>` in non-UI modes.
 
 ## Quick Start
 
@@ -68,21 +82,35 @@ Press **Alt+M** or type `/intercom` to open the session list overlay:
 2. **Compose message** — Write your message in the compose overlay
 3. **Send** — Press Enter to send, Escape to cancel
 
+Press **h** on a highlighted session to hand this session over to it instead (see [Workflow: Handing Over a Session](#workflow-handing-over-a-session)).
+
 ### From the Agent
 
-The agent can list sessions and send messages using the `intercom` tool. Tool calls and results render as compact transcript rows so send/ask/reply flows are easy to scan. For common patterns like planner-worker delegation, the bundled `pi-intercom` skill provides copy-paste ready examples:
+The agent can list sessions and send messages using the `intercom` tool. Tool calls and results render as compact transcript rows so send/ask/reply flows are easy to scan. Use `/intercom-id` to insert a handoff snippet for the current session's stable intercom target into the editor. For common patterns like planner-worker delegation, the bundled `pi-intercom` skill provides copy-paste ready examples:
 
 ```typescript
 // List active sessions
 intercom({ action: "list" })
 // → **Current session:**
-// → • executor (20d43841) — ~/projects/api (claude-sonnet-4) [self, idle]
+// → • executor (20d43841) — ~/projects/api (claude-sonnet-4 · 42% ctx) · Herdr Platform [w5] / API [w5:t2] / pane w5:p4 [self, idle]
 // → **Other sessions:**
-// → • research (6332faab) — ~/projects/api (claude-sonnet-4) [same cwd, thinking]
+// → • research (6332faab) — ~/projects/api (claude-sonnet-4) · not under Herdr [same cwd, thinking]
+
+// List only peers in the same working directory
+intercom({ action: "list-cwd" })
 
 // Send a message
 intercom({ action: "send", to: "research", message: "Check if UserService.validate() handles null" })
 // → Message sent to research
+
+// Send to a visible peer session in another codebase, opening a Herdr project pane if needed
+intercom({
+  action: "send",
+  cwd: "/Users/me/projects/billing",
+  openProjectPaneIfMissing: true,
+  message: "Let's discuss the billing retry design in this repo."
+})
+// → Opened Herdr project pane pane-... for /Users/me/projects/billing and sent message to subagent-chat-...
 
 // Check connection status
 intercom({ action: "status" })
@@ -115,7 +143,11 @@ Found the issue — UserService.validate() doesn't check for null input.
 See auth.ts:142-156.
 ```
 
-The reply hint (enabled by default) points to `intercom({ action: "reply", ... })`, so recipients do not need raw sender or `replyTo` IDs. Idle recipients get a new turn immediately; busy interactive recipients receive the message once they go idle. Attachment content is included in the agent-visible body, and messages are rendered inline and stored in Pi session history.
+The reply hint (enabled by default) points to `intercom({ action: "reply", ... })`, so recipients do not need raw sender or `replyTo` IDs. Idle recipients get a new turn immediately; by default busy interactive recipients enter Pi's steering queue at the next safe model boundary without aborting the run. With `busyDelivery: "human-first"`, busy interactive peers wait outside Pi's queues: one FIFO peer is steered per turn when no human message is pending. If the run ends first, the idle flush releases one via the normal `inboundTrigger` policy; remaining peers wait for later turns. Sustained human input can delay peers. Busy non-UI sessions retain their auto-reply behavior. Attachment content is included in the agent-visible body, and messages are rendered inline and stored in Pi session history.
+
+In fullscreen mode, a plain left-click anywhere on an intercom message expands or collapses just that message; click again to undo. Only the display changes, not the message content, what the model sees, or session history. Dragging to select text, clicking links, wheel scrolling, and double- or triple-click word and line selection keep working and do not toggle the message, though the first click of a rapid double-click can. Regular mode leaves mouse input to the terminal.
+
+Ctrl+O still expands or collapses every message and clears per-message choices. Those choices are not saved: reloading, resuming, or forking a session, or anything that rebuilds the whole transcript, returns each message to the Ctrl+O state.
 
 ## Workflow: Planner-Worker Coordination
 
@@ -127,7 +159,7 @@ Open two terminals and start pi in each. Name them so they can find each other:
 
 ```
 # Terminal 1                    # Terminal 2
-/name planner                   /name worker
+/alias planner                 /alias worker
 ```
 
 Verify they see each other from either session:
@@ -202,17 +234,52 @@ To reply, use the intercom tool: intercom({ action: "reply", message: "..." })
 Only GET/PUT/DELETE — never POST. Max 3 retries with exponential backoff starting at 100ms.
 ```
 
-This matters because the agent receiving the message doesn't need to reconstruct raw `to` and `replyTo` IDs — the hint is right there. Combined with idle-gated `triggerTurn` delivery, it enables real back-and-forth conversation without interrupting work in progress. If the reply happens later instead of in the triggered turn, `intercom({ action: "reply" })` falls back to the single unresolved inbound ask, and `intercom({ action: "pending" })` shows who is still waiting.
+This matters because the agent receiving the message doesn't need to reconstruct raw `to` and `replyTo` IDs — the hint is right there. Combined with immediate idle triggering and safe busy-turn steering, it enables real back-and-forth conversation without aborting work in progress or delaying messages until they become stale. If the reply happens later instead of in the triggered turn, `intercom({ action: "reply" })` falls back to the single unresolved inbound ask, and `intercom({ action: "pending" })` shows who is still waiting.
 
 ### `send` vs `ask`
 
-`send` is fire-and-forget — the tool returns immediately after delivery. By default, it sends immediately even in interactive sessions. If you want an approval dialog before non-reply sends, set `confirmSend: true` in config. Replies that include `replyTo` still skip confirmation so reply-hint flows can continue without an extra approval step.
+`send` is fire-and-forget — the tool returns immediately after delivery. If the target is disconnected and the broker holds the message in its mailbox, the result says the session is not connected and the message is waiting for it to reconnect, instead of saying it was sent. When the destination has exactly one pending inbound ask, `send` infers that it is the answer, attaches the ask's `replyTo`, and reports `Reply sent to <target> (inferred from pending ask)`. During a turn triggered by an inbound ask, `send` refuses a different non-reply target instead of treating CWD, roster position, or project hierarchy as reply authority. With zero or multiple matching asks, it remains an ordinary unthreaded send. An inferred answer still uses the `confirmSend` dialog when configured; only a caller-supplied `replyTo` skips confirmation.
 
-`ask` sends the message and blocks until the recipient responds (10-minute timeout). The reply comes back as the tool result, so the agent continues in the same turn with full context. No confirmation dialog — if you're asking and waiting, the intent is clear.
+`ask` requires a currently connected recipient, then blocks until it responds (10-minute timeout by default; set `PI_INTERCOM_ASK_TIMEOUT_MS` to a positive millisecond value to change it). If the target is disconnected, `ask` fails immediately; use `send` when queued, non-blocking mailbox delivery is appropriate. The reply comes back as the tool result, so the agent continues in the same turn with full context. No confirmation dialog — if you're asking and waiting, the intent is clear.
 
 `reply` is receiver-side sugar for replying to an inbound ask. In the turn triggered by an incoming intercom ask, `intercom({ action: "reply", message: "..." })` targets that exact sender and message automatically. If you reply later, it falls back to the single unresolved inbound ask. If multiple asks are pending, use `intercom({ action: "pending" })` to inspect them and then call `reply` with `to` to disambiguate.
 
+The broker keeps a bounded in-memory mailbox for recently disconnected explicitly named sessions. If a lightweight CLI sender asks a long-running session something and exits before the answer, the later `reply` is accepted into that mailbox instead of failing with `Session not found`; a process that reconnects with the same explicit name and directory receives the queued reply. Runtime-only unnamed-session aliases never transfer mailbox ownership, and routing never remaps mail back to its sender. Queued messages expire after 24 hours, and the broker keeps running while any are waiting, even with no sessions connected. This is per-broker runtime state, not durable storage across broker restarts.
+
+Incoming messages carry diagnostic metadata end to end: stable message ID, sender sequence, sender timestamp, broker receive/delivery timestamps, receiver receive timestamp, and injection timestamp. Connected receivers emit `receiver_received`, `acknowledged`, and `injected` as they hand messages to Pi; held messages (during compaction or with human-first delivery) also emit `queued`, followed by `injected` or a terminal `cancelled`, `superseded`, `acknowledged` (answered before injection), or `expired` (session replaced or shut down). A message that arrives after its receiver was replaced or shut down also emits `expired` instead of being dropped silently. Duplicate IDs are acknowledged but injected at most once per receiving session. Broker mailbox delivery for temporarily disconnected targets can still report queued delivery. If an `ask` times out, the timeout names the message ID and last known delivery state. Timeout is not cancellation: an injected or broker-queued message may remain actionable unless an explicit cancellation path says otherwise.
+
+Pi sessions promise these receipts when they register, so a send to one reports `socket_delivered` only after that session confirms it received the message. If the confirmation does not arrive within 5 seconds (set `PI_INTERCOM_RECEIPT_TIMEOUT_MS` before the broker starts to change it, below 10000), or the session disconnects first, the send reports an unconfirmed outcome (`delivery: "unknown"`, `retryable: true`) instead of success, and an `ask` fails right away instead of waiting out its timeout. The message may still have arrived; if the session was only slow, its later reply to that ask still arrives as an ordinary message. CLI and other plain clients do not promise receipts and keep the immediate `socket_delivered` result.
+
+Cancellation is explicit: call `intercom({ action: "cancel", messageId })` to request cancellation of a message you originally sent. A held message is dropped with `cancelled`; an already-injected message reports `cancellation_requested` rather than pretending it removed work from Pi's queues. Supersede is also explicit: pass `supersedes: "old-message-id"` on a new `send` or `ask`. The broker only allows same sender → same receiver supersedes, marks the old message `superseded`, and sends the replacement with a new ID; a held old message is dropped, while an already-steered one may still be processed. Retries are never automatic; a retry should be a new authored message, optionally linked with `retryOf`.
+
 The planner typically uses `send`. If you prefer manual approval for outgoing non-reply messages, turn on `confirmSend: true`. The worker uses `ask` for everything (no confirmation needed, gets answers inline), so it can operate autonomously either way.
+
+## Workflow: Handing Over a Session
+
+When you move work from one session to another, for example from a session in `pi-intercom` to one already running in `pi-mcp-adapter`, a handover carries what the first session learned so the second one does not have to rediscover it.
+
+```
+/handover
+/handover mcp-worker port the schema fix to the adapter
+/handover ~/dev/pi-mcp-adapter port the schema fix to the adapter
+```
+
+`/handover` on its own opens a picker. It lists the other sessions on this machine, most recently active first, with their directory, model, status, and context use; context at 80% or more is highlighted. Your own session and subagent child sessions are hidden. "+ New session in a project path…" asks for a directory and opens a Herdr project pane there. "Fetch sessions from other machines" lists the Pi sessions on your enabled saved Herdr machines; it only runs when you choose it, because each machine is reached over SSH and can take a few seconds. Each machine shows its sessions or the reason it could not be reached. Type the optional next task in the field at the bottom (Tab moves between the list and the field), and press Enter to generate the handover. Pressing **h** on a session in the Alt+M list opens the same picker with that session selected.
+
+The first argument is the target: a session name, ID, ID prefix, or `name@machine`. A target starting with `/`, `./`, `../`, or `~/` is a project path; if no session is running there, pi-intercom opens a Herdr project pane and starts Pi in it. The rest of the line is the next task and is optional. The command generates the handover, opens it in an editor for you to review and change, and sends it when you save.
+
+Agents can do the same without the review step:
+
+```typescript
+intercom({ action: "handover", to: "mcp-worker", message: "Port the schema fix to the adapter" })
+intercom({ action: "handover", cwd: "/Users/me/dev/pi-mcp-adapter", openProjectPaneIfMissing: true })
+```
+
+What is sent: the current model reads this session's conversation, as Pi would send it to the model after compaction and context edits, and writes a summary with the next task, key decisions and rejected approaches, relevant files and repositories, current state, and open questions. A short header names the sender, its working directory, and its git branch and commit. For a target on the same machine, the header also gives the path of the sender's session file so the receiver can read the full transcript when it needs more detail. For a `name@machine` target the handover is sent as plain text without that path.
+
+The receiver gets the handover as an ordinary intercom message asking it to act on the next task, so its `inboundTrigger` and `busyDelivery` settings decide when it starts: right away when idle, or at the next safe point when busy. The handover tells the receiver to treat it as a peer's report and to check its claims against the repository.
+
+Privacy: the summary is generated from your session transcript by your current model and provider, like compaction. The model is told to leave out secrets, tokens, credentials, and private keys, but review the text with `/handover` when the session handled sensitive material. `confirmSend: true` also applies to agent handovers.
 
 ## Workflow: Subagent-to-Supervisor Escalation
 
@@ -233,11 +300,15 @@ If any are missing, the session falls back to the regular `intercom` tool.
 
 | Reason | Behavior | Use When |
 |--------|----------|----------|
-| `need_decision` | Sends an ask and blocks until the supervisor replies (10-minute timeout) | The subagent is blocked, uncertain, needs approval, or faces a product/API/scope decision |
+| `need_decision` | Sends an ask and blocks until the supervisor replies (10-minute timeout by default; configurable with `PI_INTERCOM_ASK_TIMEOUT_MS`) | The subagent is blocked, uncertain, needs approval, or faces a product/API/scope decision |
 | `interview_request` | Sends structured questions and blocks until the supervisor replies | The subagent needs multiple machine-readable answers from the supervisor in one exchange |
 | `progress_update` | Fire-and-forget update to the supervisor | Meaningful progress or unexpected discoveries that change the plan |
 
 Do not use `contact_supervisor` for routine completion handoffs. Return the final subagent result normally through `pi-subagents`.
+
+A child subagent can still use the regular `intercom` tool to coordinate with an explicit peer session. Use `to` alone for any live peer on the machine, `cwd` alone for the sole live peer in another codebase, or `to` plus `cwd` when the directory is a safety guard. Use `contact_supervisor` instead when the answer changes the task contract, needs owner approval, or would require opening a new visible project pane.
+
+For bounded work in another codebase, prefer `pi-subagents` with an explicit `cwd`. Intercom project panes are for durable visible peer conversations, not ordinary delegated work.
 
 ### Example: Blocked Subagent Asks for Guidance
 
@@ -312,11 +383,17 @@ The supervisor can reply with plain JSON or a fenced `json` block. If the reply 
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `action` | string | `"list"`, `"send"`, `"ask"`, `"reply"`, `"pending"`, or `"status"` |
-| `to` | string | Target session name or ID (for send/ask, or to disambiguate reply) |
-| `message` | string | Message text (for send/ask/reply) |
+| `action` | string | `"list"`, `"list-cwd"`, `"send"`, `"ask"`, `"handover"`, `"reply"`, `"pending"`, `"status"`, or `"cancel"` |
+| `to` | string | Target session name or ID. Without `cwd`, send/ask resolve it globally. With `cwd`, send/ask require the target to be in that directory. Also disambiguates reply. |
+| `message` | string | Message text (for send/ask/reply), or the optional next task for `handover` |
 | `attachments` | array | Optional `file`, `snippet`, or `context` attachments |
 | `replyTo` | string | Optional message ID for threading or replying to an `ask` |
+| `messageId` | string | Optional explicit message ID for send/ask, or required message ID for `cancel` |
+| `supersedes` | string | Optional previous message ID that this send/ask explicitly replaces |
+| `retryOf` | string | Optional previous message ID that this send/ask explicitly retries |
+| `cwd` | string | Working directory filter for `list-cwd`. For send/ask, scopes target lookup to that directory; without `to`, selects the sole live peer there. |
+| `openProjectPaneIfMissing` | boolean | For `send`/`ask` with `cwd`, open a visible Herdr project pane and launch Pi when no matching live session exists |
+| `focus` | boolean | For `openProjectPaneIfMissing`, focus the new Herdr pane. Defaults to true |
 
 ### contact_supervisor
 
@@ -328,7 +405,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 | `message` | string | The decision request, optional interview note, or progress update |
 | `interview` | object | Required for `interview_request`: `{ title?, description?, questions: [...] }` |
 
-**`need_decision`** — Sends a formatted ask to the supervisor and blocks until it replies (10-minute timeout). The reply comes back as the tool result. Includes run metadata in the message so the supervisor knows which subagent is asking.
+**`need_decision`** — Sends a formatted ask to the supervisor and blocks until it replies (10-minute timeout by default; configurable with `PI_INTERCOM_ASK_TIMEOUT_MS`). The reply comes back as the tool result. Includes run metadata in the message so the supervisor knows which subagent is asking.
 
 **`interview_request`** — Sends a formatted, agent-readable interview to the supervisor and blocks until it replies. Questions use a local pi-interview-like shape: `{ id, type, question, options?, context? }` where `type` is `single`, `multi`, `text`, `image`, or `info`. `info` questions are context-only and do not need responses. The supervisor reply should be JSON with `{ "responses": [{ "id": "...", "value": ... }] }`. Parsed JSON replies are returned in `details.structuredReply`.
 
@@ -336,15 +413,19 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 ### intercom actions
 
-**`list`** — Returns the current session plus other active intercom-connected sessions with name, short ID, working directory, model, and live status. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`.
+**`list`** — Returns the current session plus other active intercom-connected sessions with name, short ID, working directory, model, live status, and explicit Herdr location. For Herdr-hosted sessions, the broker joins the process's stable Pi session identity against one fresh `herdr api snapshot` per list request and returns readable workspace/tab labels together with their opaque IDs and the diagnostic pane ID. Workspace and tab are not registration-time values and are not cached, so moving a pane is reflected by the next list. `herdrLocation.status` is `current`, `not_hosted`, or `unavailable`; unavailable results include a reason such as `pane_missing` or `herdr_unavailable` rather than inviting inference from cwd or session name. A Herdr command failure does not prevent the rest of the roster from being returned. When no connected session advertises Herdr hosting, `list` does not invoke Herdr and preserves the ordinary roster shape and rendering without location lines. `herdrPaneId` is the launch alias and may be stale after a move; consumers needing the current diagnostic pane ID must use `herdrLocation.paneId`. Pane IDs are diagnostic metadata, not intercom addressing handles. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`.
 
-**`send`** — Sends a message to the specified session. By default it sends immediately, including in interactive sessions. Set `confirmSend: true` in config if you want a confirmation dialog for non-reply sends. Replies that include `replyTo` skip confirmation. Returns delivery confirmation.
+**`send`** — Sends a message to the specified session and returns immediately after delivery. If the destination has exactly one pending inbound ask, `send` infers the message is its answer and returns `Reply sent to <target> (inferred from pending ask)`. During a turn triggered by an inbound ask, a non-reply `send` to a different target is rejected so a guessed parent/root CWD cannot receive an accidental reply. Zero or multiple pending-ask matches remain unthreaded sends outside the active ask turn. Set `confirmSend: true` to confirm ordinary and inferred sends. A caller-supplied `replyTo` skips confirmation. `to` alone resolves globally across all live sessions. `cwd` alone targets the sole live peer in that directory. `to` plus `cwd` requires that peer to be in the directory. With `openProjectPaneIfMissing: true`, pi-intercom opens a visible Herdr project pane, starts Pi there, waits for that session to register, then delivers the message through normal intercom routing.
 
-**`ask`** — Sends a message and waits for the recipient to reply (10-minute timeout). The reply is returned as the tool result. No confirmation dialog. Only one pending `ask` is allowed per session at a time. Use this when the agent needs the answer to continue working.
+**`ask`** — Requires a currently connected recipient, sends a message, and waits for the recipient to reply (10-minute timeout by default; configurable with `PI_INTERCOM_ASK_TIMEOUT_MS`). A disconnected target fails immediately rather than queueing a blocking request. The reply is returned as the tool result. No confirmation dialog. Only one pending `ask` is allowed per session at a time. Use this when the agent needs the answer to continue working. The same `to`, `cwd`, and `openProjectPaneIfMissing` targeting rules apply.
+
+**`handover`** — Summarizes the current session with the current model and sends the summary to the target, which acts on it. `message` is the optional next task. Targeting, confirmation, and delivery work exactly like `send`, including `name@machine` targets. `replyTo`, `supersedes`, `retryOf`, and `attachments` are rejected. See [Workflow: Handing Over a Session](#workflow-handing-over-a-session).
 
 **`reply`** — Replies to the current intercom-triggered message if there is one. Otherwise it falls back to the single unresolved inbound ask. If multiple asks are pending, pass `to` or inspect them with `pending` first. Under the hood this is still a normal `send` with the exact `replyTo` value.
 
 **`pending`** — Lists unresolved inbound asks with sender, message ID, elapsed time, and a short preview. Useful when replying after the original triggered turn.
+
+**`cancel`** — Requests cancellation of a message previously sent by the current session. Queued messages are removed before injection; already-injected messages receive a visible cancellation request.
 
 **`status`** — Shows connection status, session ID, and total count of active sessions (including the current session).
 
@@ -355,6 +436,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 | Alt+M | Open session list overlay |
 | ↑/↓ | Navigate session list |
 | Enter | Select session / Send message |
+| h | Hand over to the highlighted session (session list) |
 | Escape | Cancel / Close overlay |
 
 ## Config
@@ -366,22 +448,35 @@ Create `~/.pi/agent/intercom/config.json`:
   "brokerCommand": "npx",
   "brokerArgs": ["--no-install", "tsx"],
   "confirmSend": false,
+  "inboundTrigger": "always",
+  "busyDelivery": "steer",
   "enabled": true,
   "replyHint": true,
-  "status": "researching"
+  "status": "researching",
+  "crossMachine": {
+    "machineName": "laptop",
+    "remoteCommand": "/usr/local/bin/pi-intercom"
+  }
 }
 ```
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `brokerCommand` | `"npx"` | Command used to start the local broker process |
-| `brokerArgs` | `["--no-install", "tsx"]` | Arguments passed to `brokerCommand` before the broker script path |
-| `confirmSend` | false | Show a confirmation dialog before non-reply sends from an interactive session with UI |
+| `brokerCommand` | `"npx"` | Advanced trusted override for the broker executable. The default value is hardened internally to run the broker in the current Node executable with the resolved bundled `tsx` loader instead of resolving `npx` through `PATH`. A custom command is spawned directly without a shell, so on Windows it must name an executable such as `bun`, not a `.cmd` shim such as `npx`. |
+| `brokerArgs` | `["--no-install", "tsx"]` | Advanced trusted arguments passed to custom `brokerCommand` before the broker script path |
+| `confirmSend` | false | Show a confirmation dialog before ordinary or inferred sends from an interactive session with UI; caller-supplied `replyTo` skips it |
+| `inboundTrigger` | `"always"` | Auto-trigger policy for inbound broker messages: `"always"`, `"replies"`, or `"never"`. Local in-process subagent relay events still trigger the addressed session. |
+| `busyDelivery` | `"steer"` | `"steer"` promptly steers peers into active interactive runs. Opt into `"human-first"` to hold peers until a turn boundary with no pending human input; one held peer is released per turn. Non-interactive busy behavior is unchanged. |
 | `enabled` | true | Enable/disable intercom entirely |
 | `replyHint` | true | Include reply instruction in incoming messages |
 | `status` | — | Optional custom status suffix shown after the automatic lifecycle status, for example `thinking · researching` |
+| `crossMachine.machineName` | lowercased short hostname | Name peers use for this host in their Herdr saved-machine lists |
+| `crossMachine.remoteCommand` | `"pi-intercom"` | Command invoked through non-interactive SSH on remote machines |
 
-For example, if you have Bun installed and want it to start the broker directly, use:
+If `config.json` cannot be parsed or contains an invalid value, pi-intercom logs the error and fails closed for inbound broker auto-triggering by using `inboundTrigger: "never"` until the config is fixed.
+Obsolete `toolVisibility` values are ignored; the generic `intercom` tool remains stable in the active tool set for prompt-cache friendliness.
+
+Custom broker commands are trusted local configuration: anyone who can edit this config can choose the executable used for future broker auto-spawns. For example, if you have Bun installed and want it to start the broker directly, use:
 
 ```json
 {
@@ -391,6 +486,125 @@ For example, if you have Bun installed and want it to start the broker directly,
 ```
 
 Pi-intercom publishes live session status automatically. Sessions register as `idle`, switch to `thinking` while the agent is running, show `tool:<name>` during tool execution, and return to `idle` on agent completion. If `status` is set in config, it is appended as context instead of replacing the lifecycle status.
+
+Set `PI_INTERCOM_SCOPE_ID` before starting Pi to opt a session into an opaque broker routing scope. The value is trimmed. Empty values are treated as unscoped. A scoped session can list, address by full ID, name, ID prefix, or cwd, receive presence and session lifecycle events, recover queued mailbox messages, and use extension-channel owner, publish, and state traffic only with sessions that registered the exact same scope. Scoped sessions and unscoped sessions do not cross this boundary. Existing unscoped behavior is unchanged when the variable is not set.
+
+`/intercom-pool <name>` moves a running session into a named pool, the same routing scope `PI_INTERCOM_SCOPE_ID` sets. The session reconnects in that pool, so it only sees and messages sessions in the same pool. `/intercom-pool default` moves it back to the default pool, and `/intercom-pool` alone shows the current pool, which also appears in the `status` action and the `/intercom` overlay. Subagents launched afterwards join the same pool, and `/reload` keeps it. A new `pi` launch starts in the default pool unless you set the variable. The switch is refused while the session waits for a reply to its own ask. Messages already queued for the session in the old pool stay there.
+
+By default, runtime state and config live under `~/.pi/agent/intercom`. If Pi is launched with `PI_CODING_AGENT_DIR`, pi-intercom uses `$PI_CODING_AGENT_DIR/intercom` instead, including `config.json`, broker PID/lock files, sockets, and launcher state.
+
+The broker also runs from this runtime directory so its working directory does not lock the installed package against updates on Windows. Custom broker commands can use executables on `PATH` or absolute paths; relative file paths in commands and arguments resolve from the runtime directory.
+
+## Extension channels
+
+Other Pi extensions can use intercom's broker for bounded, non-conversational coordination. Extension-channel traffic never calls `pi.sendMessage()`, never enters a session transcript, and never starts an agent turn.
+
+Register during `session_start` so intercom includes the capability in its deferred broker registration:
+
+```typescript
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  INTERCOM_EXTENSION_REGISTER_EVENT,
+  type IntercomExtensionChannel,
+} from "pi-intercom/extension-api.ts";
+
+export default function (pi: ExtensionAPI) {
+  let channel: IntercomExtensionChannel | undefined;
+
+  pi.on("session_start", () => {
+    pi.events.emit(INTERCOM_EXTENSION_REGISTER_EVENT, {
+      namespace: "example/v1",
+      ownerEligible: true,
+      onReady: (value: IntercomExtensionChannel) => { channel = value; },
+      onEvent: (event: unknown) => { /* owner, state, peer, or payload event */ },
+    });
+  });
+}
+```
+
+The broker:
+
+- advertises `extension-bus-v1` through feature negotiation
+- routes payloads only to sessions advertising the same namespace
+- elects one owner per namespace and changes its epoch after socket replacement
+- rejects stale owner-only writes
+- stores at most 64 KiB of opaque, revisioned state per namespace
+
+`channel.publish()` accepts payloads up to 16 KiB. A `capable` broadcast includes the sender, so consumers must not blindly republish messages they receive. `channel.commitState()` uses compare-and-swap against the last observed revision. Capabilities registered after the broker connection is established are synchronized without reconnecting. Clients connected to an older broker see the channel as unsupported and do not send extension operations.
+
+### Extension outbox
+
+Same-process extensions can request a user-visible intercom send through the consent-aware outbox. Emit `intercom:outbox-request` with a unique `requestId`; listen for `intercom:outbox-result` and treat `sent`, `rejected`, `blocked`, and `failed` as terminal states. There is no fire-and-forget mode.
+
+```typescript
+import {
+  INTERCOM_OUTBOX_REQUEST_EVENT,
+  INTERCOM_OUTBOX_RESULT_EVENT,
+  type IntercomOutboxResult,
+} from "pi-intercom/extension-api.ts";
+
+pi.events.on(INTERCOM_OUTBOX_RESULT_EVENT, (result: IntercomOutboxResult) => {
+  if (result.requestId === "example-request-1") {
+    // Handle the terminal result.
+  }
+});
+
+pi.events.emit(INTERCOM_OUTBOX_REQUEST_EVENT, {
+  version: 1,
+  requestId: "example-request-1",
+  extensionId: "example-extension",
+  extensionName: "Example Extension",
+  to: "planner",
+  message: "Build finished.",
+});
+```
+
+`confirmSend` applies to outbox requests. If confirmation is required and no UI is available, the request fails closed with `confirmation_unavailable`. The outbox resolves the target through the current session's scoped intercom client, so extensions cannot choose the sender, scope, or resolved target ID. Duplicate `requestId` values are rejected and do not deliver again. Receiver messages include structured `extension_outbox` provenance in message details; provenance is not prepended to the message body.
+
+### Session identity claim
+
+At session start, pi-intercom emits `intercom:session-identity` on that session's event bus before it picks the session's intercom ID. An extension that owns the session's routing address can call `claim(id)` synchronously. The first non-empty claim becomes that session's intercom ID, and it wins over `PI_INTERCOM_STABLE_ID` and `stableId`. Because the claim is per session, it works for several sessions running in one process, such as in-process subagent children. The session name stays free for a human-readable label.
+
+```typescript
+import { INTERCOM_SESSION_IDENTITY_EVENT, type IntercomSessionIdentityRequestV1 } from "pi-intercom/extension-api.ts";
+
+pi.events.on(INTERCOM_SESSION_IDENTITY_EVENT, (request: IntercomSessionIdentityRequestV1) => {
+  request.claim("subagent-worker-run1-1");
+});
+```
+## Scripting and Remote Machines
+
+The `pi-intercom` executable is a minimal command-line client for scripted access to the local broker. It registers as a regular session (so it appears in the roster and can receive replies while connected), reuses the same `IntercomClient` as the extension, and does not start a broker.
+
+```bash
+# roster
+pi-intercom list
+
+# fire-and-forget message (cron hooks, CI, notifications)
+pi-intercom send --to worker --text "build failed — please look at src/api"
+
+# blocking ask: prints the other session's reply and exits
+pi-intercom ask --to planner --text "which API version?" --timeout-ms 180000
+
+# JSON output for scripts
+pi-intercom list --json
+```
+
+Flags: `--to <name|session-id>`, `--text`, `--name <session-name>` (roster name, default `pi-intercom-cli`), `--timeout-ms` (ask only, default 120000), `--json`. Exit codes: `0` success, `1` usage/connection/delivery failure, `2` ask timeout. With `--json`, every command prints one object with an `ok` field: `list` returns `{ ok: true, sessions: [...] }`, and failures return `ok: false` with `error` (plus `reason: "timeout"` on timeout).
+
+### Cross-machine coordination over ssh
+
+Because the CLI runs *on the machine that owns the broker*, you can bridge sessions across machines through ssh without opening any network listener — the remote broker stays exactly as local-only as before:
+
+```bash
+ssh remote-host 'pi-intercom ask --to worker --text "done with the migration?"'
+```
+
+For native cross-machine `send`, pi-intercom discovers an agent on an explicitly selected, enabled Herdr saved machine and relays through SSH while every broker remains local-only. Use `reviewer@workstation` (or a full session UUID followed by `@workstation`) to route to the saved `workstation` machine. Ordinary local targets never fall back to remote discovery, and unknown, disabled, or malformed machine entries fail closed.
+
+The relay carries structured SSH-asserted origin metadata. Incoming headers render `From worker@laptop · unverified cross-machine` and provide a new-message `send` hint to that address. This identity is not cryptographically verified: anyone with SSH access that can invoke the relay can claim it. Cross-machine `ask`, `replyTo`, attachments, supersede, retry, cwd/project-pane routing, and lifecycle actions are not supported in v1.
+
+Discovery and delivery are bounded by five-second and fifteen-second timeouts respectively. Remote hosts must provide a compatible `pi-intercom relay` command. Non-interactive SSH often has a minimal `PATH`; set the trusted global `crossMachine.remoteCommand` to an absolute command when needed. Unknown relay versions and non-JSON responses produce an upgrade error.
 
 ## How It Works
 
@@ -418,23 +632,36 @@ graph TB
     B2 <-->|Local Socket/Pipe| B3
 ```
 
-The broker is a standalone TypeScript process that manages session registration and message routing. It auto-spawns when the first intercom-enabled session needs it and exits after 5 seconds when the last connected session disconnects. Clients now reconnect automatically if the broker disappears and later comes back.
+The broker is a standalone TypeScript process that manages session registration and message routing. It auto-spawns when the first intercom-enabled session needs it and exits 5 seconds after the last connected session disconnects, unless its mailbox still holds messages. Clients now reconnect automatically if the broker disappears and later comes back.
 
-Messages use length-prefixed JSON over a local socket/pipe transport (4-byte length + JSON payload) to handle fragmentation properly. The protocol includes request correlation for session listing, explicit delivery failures, and validation for malformed or out-of-order messages.
+**Liveness heartbeat.** A client whose broker is killed without a clean shutdown (SIGKILL, crash, or host loss) is left on a half-open socket: the OS never delivers a `close` event, so the client cannot tell it is alone and silently drops out of the roster forever. To close that gap, each registered client runs a liveness heartbeat that round-trips a lightweight `list` request and tears down the socket if the broker does not respond within the timeout, letting the existing `disconnected` → reconnect path fire. The interval defaults to 30s and the probe timeout to 5s; override them with `PI_INTERCOM_LIVENESS_INTERVAL_MS` and `PI_INTERCOM_LIVENESS_TIMEOUT_MS` (the timeout is clamped to the interval).
+
+The broker uses the same heartbeat in the other direction. Each client tells the broker its heartbeat interval when it registers, and the broker drops a session that sends nothing for three intervals (90s by default). A process that died without closing its socket therefore leaves the roster, and mail sent to it afterwards queues for redelivery. Clients that do not report an interval are never dropped this way. On the TCP transport the broker also turns on TCP keepalive.
+
+Messages use length-prefixed JSON over a local socket/pipe transport (4-byte length + JSON payload) to handle fragmentation properly. The protocol includes request correlation for session listing, explicit delivery failures, validation for malformed or out-of-order messages, a frame-size cap, per-connection local rate limiting, and no-op presence coalescing.
+
+Session IDs are the trusted addressing key within one broker routing scope. Duplicate names remain allowed for same-user workflows, but sends to ambiguous names fail and users should target the stable session ID shown by `list`/`status` in trust-sensitive flows. Mail queued for a disconnected session is redelivered to a session that reconnects under the same session ID, or to a session that matches both its explicit name and its directory, so a same-named session in a different project never inherits another project's queued messages. Runtime-only `subagent-chat-...` aliases are excluded from name-based mailbox reconnection, and a disconnected mailbox is never remapped to the sender. Set `PI_INTERCOM_STABLE_ID` or `stableId` in `config.json` to pin a session's intercom ID across full process relaunches.
+
+One live process holds a session ID at a time, within one `PI_INTERCOM_SCOPE_ID` boundary. When a different live process registers an ID that is already held, the broker refuses it with `E_SESSION_HELD` and the first holder keeps the ID and its mail. The refused session stays off the roster, stops reconnecting, shows a warning naming the holder's process and directory, and records an `intercom_session_held` session entry so headless runs keep the reason too. Close the other session and run `/reload` to try again. If the holder's process has exited, or the same process reconnects, the ID is handed over at once. `config.json` is machine-global, so a fixed `stableId` there lets only one session on the machine use intercom at a time; pin several sessions with a separate `PI_INTERCOM_STABLE_ID` each.
+
+The broker owns local trust metadata such as `trustedLocal`; `peerUid` is reserved for runtimes that can expose real peer credentials and is left unset otherwise. Client-supplied cwd/model/pid/status are display metadata, not authentication; the broker only uses pid to tell whether a session ID's holder is still running.
 
 Async extension work (startup, inbound flushes, reconnects, overlays, and relays) no-ops if the session shuts down or reloads before it settles.
 
-Runtime files live at `~/.pi/agent/intercom/`:
+Runtime files live at `~/.pi/agent/intercom/` by default, or `$PI_CODING_AGENT_DIR/intercom/` when `PI_CODING_AGENT_DIR` is set:
 - `broker.sock` — Unix domain socket for communication (macOS/Linux only; Windows uses a named pipe instead)
-- `broker-launch.vbs` — Windows helper script used to launch the broker without a console window
 - `broker.pid` — Broker process ID
+- `broker.spawn.lock` — Auto-spawn lock file
+- `broker.port.json` — Dynamic localhost TCP endpoint, only when Windows TCP transport is explicitly enabled
 - `config.json` — User configuration
+
+Supported `config.json` keys include `stableId` for restart-stable addressing, `status` for a custom status suffix, `inboundTrigger` (`always`, `replies`, or `never`), `busyDelivery` (`steer` or `human-first`), `replyHint`, `confirmSend`, and advanced broker launch overrides.
 
 ## Design Decisions
 
-**Local IPC instead of TCP.** Same-machine only by design. `pi-intercom` uses Unix sockets on macOS/Linux and a named pipe on Windows, which keeps setup simple and avoids port management.
+**Local IPC instead of TCP.** Same-machine only by design. `pi-intercom` uses Unix sockets on macOS/Linux and a named pipe on Windows, which keeps setup simple and avoids port management. Windows TCP is available only as an explicit escape hatch with `PI_INTERCOM_TRANSPORT=tcp` (or `PI_INTERCOM_TCP=1`) for environments where named pipes are blocked. In that mode the broker binds a dynamic `127.0.0.1` port, records the endpoint plus a local secret under the intercom state dir, and requires that secret before health or registration succeeds. Health replies do not echo the secret, so a random localhost process cannot discover it through the broker protocol.
 
-**Auto-spawn with file lock.** The broker starts on first connection and exits after 5 seconds idle. There is no daemon to manage. A spawn lock file, keyed by PID and timestamp, prevents duplicate brokers when multiple sessions start at once.
+**Auto-spawn with file lock.** The broker starts on first connection and exits 5 seconds after the last session disconnects. If its mailbox still holds messages, it stays running until they are delivered or expire. There is no daemon to manage. A spawn lock file, keyed by PID and timestamp, prevents duplicate brokers when multiple sessions start at once.
 
 **`ask` stays client-side.** The broker still routes plain messages; it does not have a special request/response mode for `ask`. The client waits for a matching reply before it triggers a new turn, then returns that reply as the tool result. Reply hints make that flow practical by showing the recipient the exact `send` call to use. Separately, `list` / `sessions` now carry a `requestId` so a delayed session-list reply cannot be mistaken for a newer one.
 
@@ -458,6 +685,8 @@ Use pi-messenger for multi-agent swarms working on a shared task. Use pi-interco
 ├── index.ts              # Extension entry point
 ├── types.ts              # SessionInfo, Message, protocol types
 ├── config.ts             # Config loading
+├── handover.ts           # Session handover summary and header
+├── project-agent.ts      # Herdr project-pane launch and cwd target resolution
 ├── broker/
 │   ├── broker.ts         # Broker process
 │   ├── client.ts         # IntercomClient class
@@ -468,6 +697,7 @@ Use pi-messenger for multi-agent swarms working on a shared task. Use pi-interco
 │   └── paths.test.ts     # Path resolution tests
 ├── ui/
 │   ├── session-list.ts   # Session selection overlay
+│   ├── handover-picker.ts # /handover session picker
 │   ├── compose.ts        # Message composition overlay
 │   └── inline-message.ts # Received message display
 └── skills/
@@ -481,4 +711,4 @@ Use pi-messenger for multi-agent swarms working on a shared task. Use pi-interco
 - **No dedicated intercom log** — Messages are kept in Pi session history, but there is no separate intercom transcript or inbox
 - **No attachments UI** — `file`, `snippet`, and `context` attachments are supported in the protocol, but not in the compose overlay
 - **Only connected sessions appear** — The list shows Pi sessions that have loaded `pi-intercom` and successfully registered with the broker, not every open Pi process on the machine
-- **Broker lifecycle** — The broker auto-spawns on first use and exits when idle; sessions reconnect automatically if the broker restarts
+- **Broker lifecycle** — The broker auto-spawns on first use and exits once no sessions are connected and its mailbox is empty; sessions reconnect automatically if the broker restarts
